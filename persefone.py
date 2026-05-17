@@ -9,7 +9,7 @@ import sympy as sp
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import pandas as pd
+# pandas removed (not used) — keep dependencies minimal
 
 # ============================================
 # CONFIGURACIÓN DE LA PÁGINA
@@ -134,15 +134,55 @@ with st.sidebar:
 # FUNCIONES DE CÁLCULO
 # ============================================
 
+def sanitize_expr(s):
+    """Sanitiza la expresión de entrada: reemplaza caracteres Unicode comunes por operadores Python."""
+    if not isinstance(s, str):
+        return s
+    m = {
+        '·': '*',
+        '×': '*',
+        '−': '-',
+        '—': '-',
+        '^': '**',
+        '²': '**2',
+        '³': '**3',
+        '⁴': '**4'
+    }
+    for k, v in m.items():
+        s = s.replace(k, v)
+    return s
+
+
+def _get_numeric_func(funcion_str):
+    """Parsea la expresión simbólica y devuelve una función numpy-vectorizada.
+
+    Devuelve None si no se puede parsear.
+    """
+    x, y = sp.symbols('x y', real=True)
+    expr_str = sanitize_expr(funcion_str).replace('^', '**')
+    namespace = {
+        'x': x, 'y': y,
+        'sin': sp.sin, 'cos': sp.cos, 'tan': sp.tan,
+        'exp': sp.exp, 'log': sp.log, 'sqrt': sp.sqrt,
+        'pi': sp.pi, 'e': sp.E
+    }
+    try:
+        f_sym = sp.sympify(expr_str, locals=namespace)
+        f_num = sp.lambdify((x, y), f_sym, 'numpy')
+        return f_sym, f_num
+    except Exception:
+        return None, None
+
+
 @st.cache_data
 def calcular_todo(funcion_str, x0, y0, vx, vy):
-    """Calcula todo: función, derivadas, gradiente, derivada direccional"""
-    
+    """Calcula todo: función, derivadas, gradiente, derivada direccional.
+
+    Usa SymPy para parsear la expresión y `lambdify` para evaluaciones numéricas.
+    """
     x, y = sp.symbols('x y', real=True)
-    
-    # Procesar la función
-    expr_str = funcion_str.replace('^', '**')
-    
+    expr_str = sanitize_expr(funcion_str).replace('^', '**')
+
     try:
         namespace = {
             'x': x, 'y': y,
@@ -150,39 +190,51 @@ def calcular_todo(funcion_str, x0, y0, vx, vy):
             'exp': sp.exp, 'log': sp.log, 'sqrt': sp.sqrt,
             'pi': sp.pi, 'e': sp.E
         }
-        f = eval(expr_str, {"__builtins__": {}}, namespace)
-        
-        # Derivadas
+        f = sp.sympify(expr_str, locals=namespace)
+
+        # Derivadas simbólicas
         df_dx = sp.diff(f, x)
         df_dy = sp.diff(f, y)
-        
-        # Evaluación numérica
-        subs = {x: x0, y: y0}
-        f_num = float(f.subs(subs).evalf())
-        grad_x = float(df_dx.subs(subs).evalf())
-        grad_y = float(df_dy.subs(subs).evalf())
-        
+
+        # Lambdify para evaluaciones rápidas
+        f_np = sp.lambdify((x, y), f, 'numpy')
+        df_dx_np = sp.lambdify((x, y), df_dx, 'numpy')
+        df_dy_np = sp.lambdify((x, y), df_dy, 'numpy')
+
+        # Evaluación numérica en el punto
+        f_val = f_np(x0, y0)
+        if np.iscomplexobj(f_val):
+            f_num = float(np.real(f_val))
+        else:
+            f_num = float(f_val)
+
+        grad_x_val = df_dx_np(x0, y0)
+        grad_y_val = df_dy_np(x0, y0)
+        grad_x = float(np.real(grad_x_val)) if np.iscomplexobj(grad_x_val) else float(grad_x_val)
+        grad_y = float(np.real(grad_y_val)) if np.iscomplexobj(grad_y_val) else float(grad_y_val)
+
         # Derivada direccional
         norm = np.sqrt(vx**2 + vy**2)
         if norm > 0:
-            vx_n, vy_n = vx/norm, vy/norm
+            vx_n, vy_n = vx / norm, vy / norm
         else:
             vx_n, vy_n = 1.0, 0.0
-        
+
         deriv_dir = grad_x * vx_n + grad_y * vy_n
-        
-        # Verificación numérica
-        h = 0.0001
+
+        # Verificación numérica usando función lambdified
+        h = 1e-4
         f_punto = f_num
-        f_desp = float(f.subs({x: x0 + h*vx_n, y: y0 + h*vy_n}).evalf())
+        f_desp_val = f_np(x0 + h * vx_n, y0 + h * vy_n)
+        f_desp = float(np.real(f_desp_val)) if np.iscomplexobj(f_desp_val) else float(f_desp_val)
         deriv_num = (f_desp - f_punto) / h
-        
-        # Tensor métrico en polares
+
+        # Tensor métrico en polares (simbólico)
         r, theta = sp.symbols('r theta', real=True, positive=True)
-        f_pol = f.subs({x: r*sp.cos(theta), y: r*sp.sin(theta)}).simplify()
+        f_pol = f.subs({x: r * sp.cos(theta), y: r * sp.sin(theta)}).simplify()
         df_dr = sp.diff(f_pol, r)
         df_dtheta = sp.diff(f_pol, theta)
-        
+
         return {
             'f': f, 'df_dx': df_dx, 'df_dy': df_dy,
             'f_num': f_num, 'grad_x': grad_x, 'grad_y': grad_y,
@@ -205,16 +257,22 @@ def graficar_superficie(funcion_str, rango, resolucion):
     y_vals = np.linspace(-rango, rango, resolucion)
     X, Y = np.meshgrid(x_vals, y_vals)
     
-    # Evaluar la función numéricamente
-    expr_str = funcion_str.replace('^', '**')
-    try:
-        Z = eval(expr_str, {
-            'x': X, 'y': Y, 'np': np,
-            'sin': np.sin, 'cos': np.cos, 'exp': np.exp,
-            'sqrt': np.sqrt, 'log': np.log, 'tan': np.tan
-        })
-    except:
-        Z = X**2 - Y**2
+    # Evaluar la función numéricamente usando lambdify (más seguro y rápido)
+    f_sym, f_np = _get_numeric_func(funcion_str)
+    if f_np is not None:
+        try:
+            Z = f_np(X, Y)
+            Z = np.array(Z, dtype=float)
+        except Exception:
+            Z = X**2 - Y**2
+    else:
+        fig = plt.figure(figsize=(6, 3))
+        plt.text(0.5, 0.5, 'Función inválida', ha='center', va='center')
+        plt.axis('off')
+        return fig
+    
+    # Reemplazar NaNs/inf por números finitos para visualizar
+    Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
     
     fig = plt.figure(figsize=(10, 6))
     ax = fig.add_subplot(111, projection='3d')
@@ -234,18 +292,26 @@ def graficar_contornos_gradiente(funcion_str, rango, resolucion, x0, y0):
     y_vals = np.linspace(-rango, rango, resolucion)
     X, Y = np.meshgrid(x_vals, y_vals)
     
-    expr_str = funcion_str.replace('^', '**')
-    try:
-        Z = eval(expr_str, {
-            'x': X, 'y': Y, 'np': np,
-            'sin': np.sin, 'cos': np.cos, 'exp': np.exp,
-            'sqrt': np.sqrt, 'log': np.log, 'tan': np.tan
-        })
-    except:
-        Z = X**2 - Y**2
-    
-    # Gradiente numérico
-    gy, gx = np.gradient(Z, x_vals, y_vals)
+    f_sym, f_np = _get_numeric_func(funcion_str)
+    if f_np is not None:
+        try:
+            Z = f_np(X, Y)
+            Z = np.array(Z, dtype=float)
+        except Exception:
+            Z = X**2 - Y**2
+    else:
+        fig = plt.figure(figsize=(6, 3))
+        plt.text(0.5, 0.5, 'Función inválida', ha='center', va='center')
+        plt.axis('off')
+        return fig
+
+    # Reemplazar NaNs/inf por números finitos
+    Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Gradiente numérico: np.gradient devuelve [dZ/dy, dZ/dx] cuando se da (y_vals, x_vals).
+    dZ_dy, dZ_dx = np.gradient(Z, y_vals, x_vals)
+    gx = dZ_dx
+    gy = dZ_dy
     
     fig, ax = plt.subplots(figsize=(8, 6))
     contour = ax.contourf(X, Y, Z, levels=20, cmap='viridis', alpha=0.8)
@@ -279,8 +345,12 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.markdown("## 📜 Resultados Matemáticos")
     
-    # Calcular todo
-    resultados = calcular_todo(funcion_str, x0, y0, vx, vy)
+    # Calcular todo (sanitizando entrada)
+    try:
+        resultados = calcular_todo(funcion_str, x0, y0, vx, vy)
+    except Exception as e:
+        st.error(f"Error al calcular: {e}")
+        resultados = None
     
     if resultados:
         # Diferencial y Gradiente
@@ -392,42 +462,63 @@ with st.container():
     """, unsafe_allow_html=True)
 
 # ============================================
-# VERIFICACIÓN DE ENTREGABLES
+# TRAZAS DE LAS GRÁFICAS
 # ============================================
 
 st.markdown("---")
-st.markdown("## ✅ Verificación de Entregables del PIA")
+st.markdown("## 📊 Trazas de las Gráficas")
 
-col_a, col_b, col_c = st.columns(3)
-
-with col_a:
-    st.markdown("""
-    <div class="card">
-    ✓ Código fuente<br>
-    ✓ Función potencial editable<br>
-    ✓ Desarrollo matemático<br>
-    ✓ Gráficas interactivas
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_b:
-    st.markdown("""
-    <div class="card">
-    ✓ Diferencial total<br>
-    ✓ Gradiente<br>
-    ✓ Derivada direccional<br>
-    ✓ Verificación numérica
-    </div>
-    """, unsafe_allow_html=True)
-
-with col_c:
-    st.markdown("""
-    <div class="card">
-    ✓ Tensor métrico en polares<br>
-    ✓ Transformación coordenadas<br>
-    ✓ Conclusión sobre la métrica
-    </div>
-    """, unsafe_allow_html=True)
+if resultados:
+    x_vals = np.linspace(-rango, rango, resolucion)
+    y_vals = np.linspace(-rango, rango, resolucion)
+    X, Y = np.meshgrid(x_vals, y_vals)
+    
+    f_sym, f_np = _get_numeric_func(funcion_str)
+    if f_np is not None:
+        try:
+            Z = f_np(X, Y)
+            Z = np.array(Z, dtype=float)
+            Z = np.nan_to_num(Z, nan=0.0, posinf=0.0, neginf=0.0)
+            
+            col_trace1, col_trace2 = st.columns(2)
+            
+            with col_trace1:
+                st.markdown("### 🌄 Traza: Superficie 3D")
+                st.markdown(f"""
+                <div class="card">
+                <b>Puntos en la malla:</b> {resolucion} × {resolucion} = {resolucion**2} puntos<br><br>
+                <b>Rango de X:</b> [{-rango:.2f}, {rango:.2f}]<br>
+                <b>Rango de Y:</b> [{-rango:.2f}, {rango:.2f}]<br><br>
+                <b>Rango de Z (f):</b> [{np.nanmin(Z):.6f}, {np.nanmax(Z):.6f}]<br>
+                <b>Media de Z:</b> {np.nanmean(Z):.6f}<br>
+                <b>Desv. Est. de Z:</b> {np.nanstd(Z):.6f}<br><br>
+                <b>Colormap:</b> Plasma (gradiente vibrante)<br>
+                <b>Alpha (transparencia):</b> 0.8
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col_trace2:
+                st.markdown("### 🗺️ Traza: Campo Gradiente")
+                dZ_dy, dZ_dx = np.gradient(Z, y_vals, x_vals)
+                grad_mag = np.sqrt(dZ_dx**2 + dZ_dy**2)
+                
+                st.markdown(f"""
+                <div class="card">
+                <b>Contornos (niveles):</b> 20 líneas equipotenciales<br>
+                <b>Colormap:</b> Viridis (escala perceptual)<br><br>
+                <b>Vectores del gradiente:</b><br>
+                &nbsp;&nbsp;• Mostrados cada {max(1, resolucion//10)} puntos<br>
+                &nbsp;&nbsp;• Total de vectores: ~{(resolucion//max(1, resolucion//10))**2}<br><br>
+                <b>Magnitud del gradiente:</b><br>
+                &nbsp;&nbsp;• Mínima: {np.nanmin(grad_mag):.6f}<br>
+                &nbsp;&nbsp;• Máxima: {np.nanmax(grad_mag):.6f}<br>
+                &nbsp;&nbsp;• Media: {np.nanmean(grad_mag):.6f}<br><br>
+                <b>Punto marcado:</b> P({x0:.2f}, {y0:.2f})<br>
+                <b>Valor en P:</b> f(P) = {resultados['f_num']:.6f}
+                </div>
+                """, unsafe_allow_html=True)
+        except Exception as e:
+            st.error(f"Error al procesar trazas: {e}")
 
 # ============================================
 # PIE DE PÁGINA
